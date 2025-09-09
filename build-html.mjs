@@ -36,12 +36,10 @@ export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options 
     let body = "";
 
     for (const b of (ast.blocks || [])) {
-        // page break
         body += `<section class="${b.page_break_before ? "pb" : ""}">`;
 
         const comps = ast.byBlock?.[b.block_id] || [];
         for (const c of comps) {
-            // show_if y placeholderMode se resuelven en GAS. Aquí solo render.
             const html = renderComponent(c, { data, styleMap, flagSet, ast });
             if (html) body += html;
         }
@@ -59,14 +57,14 @@ function renderComponent(c, ctx) {
         case "text": return renderText(c, ctx);
         case "image": return renderImage(c, ctx);
         case "table": return renderTableComponent(c, ctx);
-        default: return ""; // ignora tipos desconocidos
+        default: return "";
     }
 }
 
 function renderText(c, { data, styleMap }) {
     const val = bindText(c.binding, data);
     const hasValue = !!trimmed(val);
-    const mode = (c.placeholderMode || "hidden").toLowerCase(); // "hidden" | "visible"
+    const mode = (c.placeholderMode || "hidden").toLowerCase();
     const style = classFor(c.style_id, styleMap, ["text"]);
     if (!hasValue) {
         if (mode === "visible") {
@@ -74,7 +72,7 @@ function renderText(c, { data, styleMap }) {
             const phClass = classFor(c.placeholderStyle || "", styleMap, ["placeholder"]);
             return `<div class="${phClass}">${txt}</div>`;
         }
-        return ""; // oculto
+        return "";
     }
     return `<div class="${style}">${escapeHtml(val)}</div>`;
 }
@@ -97,8 +95,7 @@ function renderImage(c, { data, styleMap }) {
     return `<img src="${escapeAttr(url)}" ${style} />`;
 }
 
-function renderTableComponent(c, { data, styleMap, ast }) {
-    // El binding es {{table:Key}}. Los datos de la tabla vienen en data[Key] como array de filas.
+function renderTableComponent(c, { data, styleMap }) {
     const key = tableKey(c.binding);
     const rows = Array.isArray(data?.[key]) ? data[key] : [];
     if (!rows.length) {
@@ -109,9 +106,8 @@ function renderTableComponent(c, { data, styleMap, ast }) {
         }
         return "";
     }
-    // Opcional: encabezados
     const headers = Array.isArray(c.headers) && c.headers.length ? c.headers : rows[0].map((_, i) => `Col ${i + 1}`);
-    const dataRows = (c.headers ? rows : rows.slice(1)); // si no mandaste headers aparte, asume primera fila como header
+    const dataRows = (c.headers ? rows : rows.slice(1));
 
     const cls = classFor(c.style_id, styleMap, ["tbl"]);
     const thead = `<thead><tr>${headers.map(h => `<th>${escapeHtml(String(h))}</th>`).join("")}</tr></thead>`;
@@ -123,7 +119,6 @@ function renderTableComponent(c, { data, styleMap, ast }) {
 
 function bindText(tpl, map) {
     if (!tpl) return "";
-    // Soporta {{col:Nombre}} y {{expr:UPPER(Ciudad)}} si ya viene evaluado desde GAS (recomendado).
     return tpl.replace(/\{\{col:([^}]+)\}\}/g, (_, k) => safeStr(map?.[k]));
 }
 
@@ -132,10 +127,24 @@ function bindImageUrl(tpl, map) {
     if (!m) return "";
     const raw = String(map?.[m[1]] || "").trim();
     if (!raw) return "";
-    // Drive ID
-    if (/^[a-zA-Z0-9_-]{20,}$/.test(raw)) return `https://drive.google.com/uc?export=view&id=${raw}`;
-    // URL directa
-    if (/^https?:\/\//i.test(raw)) return raw;
+
+    // 1) Si ya es URL http(s), intentamos extraer ID si es un link de Drive y lo convertimos a lh3
+    if (/^https?:\/\//i.test(raw)) {
+        const idFromUrl =
+            // share link: https://drive.google.com/file/d/ID/view?usp=...
+            (/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]) ||
+            // uc link: https://drive.google.com/uc?export=...&id=ID
+            (/drive\.google\.com\/uc\?(?:[^#]*&)?id=([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]);
+        if (idFromUrl) return `https://lh3.googleusercontent.com/d/${idFromUrl}`;
+        // si ya es googleusercontent u otra URL directa, devuélvela tal cual
+        return raw;
+    }
+
+    // 2) Si parece un ID puro de Drive, usa el host estable de imágenes
+    if (/^[a-zA-Z0-9_-]{20,}$/.test(raw)) {
+        return `https://lh3.googleusercontent.com/d/${raw}`;
+    }
+
     return "";
 }
 
@@ -147,7 +156,6 @@ function tableKey(tpl) {
 /* ==================== Styles ==================== */
 
 function mapStyles(styles) {
-    // styles: [{style_id, font, size, weight, align, color, line_height, bg, padding, border, image_fit, max_width, max_height}]
     const map = {};
     for (const s of styles) {
         if (!s?.style_id) continue;
@@ -188,7 +196,6 @@ function lookupStyle(styleMap, styleId, key) {
 /* ==================== CSS helpers ==================== */
 
 function buildTokensCss(tokens) {
-    // tokens: { "--font":"Roboto", "--color-primary":"#0a0", ... }
     return Object.entries(tokens || {})
         .map(([k, v]) => `${k}:${String(v).replace(/;/g, "")};`)
         .join("");
