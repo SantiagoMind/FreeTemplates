@@ -128,21 +128,19 @@ function bindImageUrl(tpl, map) {
     const raw = String(map?.[m[1]] || "").trim();
     if (!raw) return "";
 
-    // 1) Si ya es URL http(s), intentamos extraer ID si es un link de Drive y lo convertimos a lh3
+    // URL ? intenta extraer ID si es de Drive
     if (/^https?:\/\//i.test(raw)) {
-        const idFromUrl =
-            // share link: https://drive.google.com/file/d/ID/view?usp=...
+        const id =
             (/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]) ||
-            // uc link: https://drive.google.com/uc?export=...&id=ID
-            (/drive\.google\.com\/uc\?(?:[^#]*&)?id=([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]);
-        if (idFromUrl) return `https://lh3.googleusercontent.com/d/${idFromUrl}`;
-        // si ya es googleusercontent u otra URL directa, devuélvela tal cual
+            (/drive\.google\.com\/uc\?(?:[^#]*&)?id=([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]) ||
+            (/googleusercontent\.com\/d\/([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]);
+        if (id) return `https://lh3.googleusercontent.com/d/${id}=s0`; // tamaño explícito evita 400
         return raw;
     }
 
-    // 2) Si parece un ID puro de Drive, usa el host estable de imágenes
+    // ID puro
     if (/^[a-zA-Z0-9_-]{20,}$/.test(raw)) {
-        return `https://lh3.googleusercontent.com/d/${raw}`;
+        return `https://lh3.googleusercontent.com/d/${raw}=s0`;
     }
 
     return "";
