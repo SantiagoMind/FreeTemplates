@@ -36,21 +36,21 @@ app.post("/render", async (req, res) => {
             return res.status(400).json({ error: "invalid_ast" });
         }
 
-        // 1) HTML base
-        const rawHtml = buildHtml({ ast, data, flags, cssTokens, options });
+        // 1) HTML base (sin inline de imágenes)
+        const html = buildHtml({ ast, data, flags, cssTokens, options });
 
-        // 2) Incrustar imágenes externas como data:URI
-        const html = await inlineExternalImages(rawHtml, rid);
-
-        // 3) Render PDF
+        // 2) Render PDF
         const browser = await puppeteer.launch({
             args: ["--no-sandbox", "--disable-setuid-sandbox", "--font-render-hinting=none"]
         });
         const page = await browser.newPage();
-        await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 });
-        await page.setContent(html, { waitUntil: "load", timeout: 120000 });
+        page.setDefaultTimeout(120000);
+        page.setDefaultNavigationTimeout(120000);
 
-        // Espera a imágenes restantes
+        await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 });
+        await page.setContent(html, { waitUntil: "networkidle0", timeout: 120000 });
+
+        // Espera a que todas las imágenes reporten load/error
         await page.evaluate(async () => {
             const imgs = Array.from(document.images || []);
             await Promise.all(
@@ -90,133 +90,3 @@ process.on("SIGINT", () => process.exit(0));
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log("renderer listening on", PORT));
-
-/* ==================== Helpers ==================== */
-
-/** Convierte cada <img src="..."> en data:URI para evitar timing/redirects/cookies */
-async function inlineExternalImages(html, rid) {
-    const IMG_RE = /<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi;
-    const matches = Array.from(html.matchAll(IMG_RE));
-    if (!matches.length) return html;
-
-    const replacements = await Promise.all(
-        matches.map(async (m) => {
-            const fullTag = m[0];
-            const srcAttr = m[1];
-
-            // Si ya viene en data:, no tocar
-            if (/^data:/i.test(srcAttr)) return null;
-
-            try {
-                const dataUrl = await toDataUrl(srcAttr);
-                if (!dataUrl) {
-                    console.warn(`[render][img][skip] src=${srcAttr} rid=${rid} err=no_data_url`);
-                    return null;
-                }
-                const newTag = fullTag.replace(srcAttr, dataUrl);
-                return { from: fullTag, to: newTag };
-            } catch (err) {
-                console.warn(`[render][img][skip] src=${srcAttr} rid=${rid} err=${err?.message || err}`);
-                return null;
-            }
-        })
-    );
-
-    let out = html;
-    for (const r of replacements) {
-        if (!r) continue;
-        out = out.split(r.from).join(r.to);
-    }
-    return out;
-}
-
-/** Genera una data:URL desde ID/URL de Drive o URL http/https normal */
-async function toDataUrl(srcIn) {
-    // Normaliza entidades HTML (&amp; -> &)
-    let src = htmlUnescape(srcIn);
-
-    // Acepta data: tal cual
-    if (/^data:/i.test(src)) return src;
-
-    const id = extractDriveId(src);
-    const candidates = [];
-
-    if (id) {
-        // Prioriza endpoint descargable estable
-        candidates.push(`https://drive.usercontent.google.com/uc?export=download&id=${id}`);
-        // Alternos
-        candidates.push(`https://lh3.googleusercontent.com/d/${id}=s0`);
-        candidates.push(`https://drive.google.com/uc?export=download&id=${id}`);
-    } else if (/^https?:\/\//i.test(src)) {
-        candidates.push(src);
-    } else if (/^[a-zA-Z0-9_-]{20,}$/.test(src)) {
-        candidates.push(`https://drive.usercontent.google.com/uc?export=download&id=${src}`);
-        candidates.push(`https://lh3.googleusercontent.com/d/${src}=s0`);
-        candidates.push(`https://drive.google.com/uc?export=download&id=${src}`);
-    } else {
-        return "";
-    }
-
-    for (const url of candidates) {
-        const data = await fetchAsDataUrl(url);
-        if (data) return data;
-    }
-    return "";
-}
-
-function extractDriveId(url) {
-    if (!/^https?:\/\//i.test(url)) return "";
-    return (
-        (/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]{20,})/i.exec(url)?.[1]) ||
-        (/drive\.google\.com\/uc\?(?:[^#]*&)?id=([a-zA-Z0-9_-]{20,})/i.exec(url)?.[1]) ||
-        (/googleusercontent\.com\/d\/([a-zA-Z0-9_-]{20,})/i.exec(url)?.[1]) ||
-        ""
-    );
-}
-
-async function fetchAsDataUrl(url) {
-    try {
-        const controller = new AbortController();
-        const t = setTimeout(() => controller.abort(), 20000);
-
-        const res = await fetch(url, {
-            redirect: "follow",
-            signal: controller.signal,
-            headers: {
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome PDF-Renderer",
-                "Accept": "image/*,*/*"
-            }
-        });
-        clearTimeout(t);
-
-        if (!res.ok) {
-            console.warn(`[render][img][http] ${url} status=${res.status} type=${res.headers.get("content-type") || ""}`);
-            return "";
-        }
-
-        const ctype = (res.headers.get("content-type") || "").split(";")[0] || guessContentType(url) || "application/octet-stream";
-        const ab = await res.arrayBuffer();
-        const b64 = Buffer.from(ab).toString("base64");
-        return `data:${ctype};base64,${b64}`;
-    } catch {
-        return "";
-    }
-}
-
-function guessContentType(u) {
-    const low = (u || "").toLowerCase();
-    if (low.includes(".png")) return "image/png";
-    if (low.includes(".jpg") || low.includes(".jpeg")) return "image/jpeg";
-    if (low.includes(".webp")) return "image/webp";
-    if (low.includes(".svg")) return "image/svg+xml";
-    return null;
-}
-
-function htmlUnescape(s) {
-    return String(s)
-        .replace(/&amp;/gi, "&")
-        .replace(/&quot;/gi, '"')
-        .replace(/&#39;/gi, "'")
-        .replace(/&lt;/gi, "<")
-        .replace(/&gt;/gi, ">");
-}
