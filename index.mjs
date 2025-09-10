@@ -104,6 +104,9 @@ async function inlineExternalImages(html, rid) {
             const fullTag = m[0];
             const src = m[1];
 
+            // Si ya viene en data:, no tocar
+            if (/^data:/i.test(src)) return null;
+
             try {
                 const dataUrl = await toDataUrl(src);
                 if (!dataUrl) {
@@ -127,13 +130,11 @@ async function inlineExternalImages(html, rid) {
     return out;
 }
 
-/** Genera una data:URL a partir de:
- *  - ID de Drive
- *  - URL de Drive (/file/d/<id>, uc?id=)
- *  - URL http/https normal
- *  Intenta múltiples endpoints descargables de Drive.
- */
+/** Genera una data:URL desde ID/URL de Drive o URL http/https normal */
 async function toDataUrl(src) {
+    // Acepta data: tal cual
+    if (/^data:/i.test(src)) return src;
+
     const id = extractDriveId(src);
     const candidates = [];
 
