@@ -1,3 +1,4 @@
+// index.mjs
 import express from "express";
 import puppeteer from "puppeteer";
 import { buildHtml } from "./build-html.mjs";
@@ -5,7 +6,7 @@ import { buildHtml } from "./build-html.mjs";
 const app = express();
 app.use(express.json({ limit: "12mb" }));
 
-// --- Logging por request (verás X-Req-Id que envíes desde GAS) ---
+// Logging por request
 app.use((req, _res, next) => {
     const rid = req.headers["x-req-id"] || "no-req-id";
     console.log(`[render] <- ${req.method} ${req.url} rid=${rid}`);
@@ -15,7 +16,7 @@ app.use((req, _res, next) => {
 // Seguridad simple por API Key (opcional)
 app.use((req, res, next) => {
     const key = process.env.API_KEY;
-    if (!key) return next(); // sin key, sin validación (dev)
+    if (!key) return next();
     if (req.headers["x-api-key"] !== key) {
         console.warn(`[render] 401 unauthorized rid=${req.headers["x-req-id"] || "no-req-id"}`);
         return res.status(401).json({ error: "unauthorized" });
@@ -35,23 +36,21 @@ app.post("/render", async (req, res) => {
             return res.status(400).json({ error: "invalid_ast" });
         }
 
-        // 1) Construir HTML base
+        // 1) HTML base
         const rawHtml = buildHtml({ ast, data, flags, cssTokens, options });
 
-        // 2) Incrustar imágenes externas como data:URI (Drive / HTTP)
+        // 2) Incrustar imágenes externas como data:URI
         const html = await inlineExternalImages(rawHtml, rid);
 
-        // 3) Lanzar navegador y renderizar
+        // 3) Render PDF
         const browser = await puppeteer.launch({
             args: ["--no-sandbox", "--disable-setuid-sandbox", "--font-render-hinting=none"]
         });
         const page = await browser.newPage();
-
         await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 });
-
         await page.setContent(html, { waitUntil: "load", timeout: 120000 });
 
-        // Esperar a que carguen (o fallen) todas las imágenes por si quedó alguna externa
+        // Espera a imágenes restantes
         await page.evaluate(async () => {
             const imgs = Array.from(document.images || []);
             await Promise.all(
@@ -76,8 +75,8 @@ app.post("/render", async (req, res) => {
 
         console.log(`[render] -> 200 pdf_bytes=${pdf.length} durMs=${Date.now() - t0} rid=${rid}`);
         res.json({
-            pdf_base64: Buffer.from(pdf).toString("base64")
-            // , html_debug: process.env.RETURN_HTML === "1" ? html : undefined
+            pdf_base64: Buffer.from(pdf).toString("base64"),
+            ...(process.env.RETURN_HTML === "1" ? { html_debug: html } : {})
         });
     } catch (e) {
         console.error(`[render][ERROR] rid=${rid} ${e?.stack || String(e)}`);
@@ -111,7 +110,6 @@ async function inlineExternalImages(html, rid) {
                     console.warn(`[render][img][skip] src=${src} rid=${rid} err=no_data_url`);
                     return null;
                 }
-                // Reemplazo conservando atributos originales
                 const newTag = fullTag.replace(src, dataUrl);
                 return { from: fullTag, to: newTag };
             } catch (err) {
@@ -124,7 +122,6 @@ async function inlineExternalImages(html, rid) {
     let out = html;
     for (const r of replacements) {
         if (!r) continue;
-        // reemplazar todas las ocurrencias de la etiqueta original
         out = out.split(r.from).join(r.to);
     }
     return out;
@@ -141,14 +138,15 @@ async function toDataUrl(src) {
     const candidates = [];
 
     if (id) {
-        // 1) Fast CDN de Google Photos/LH3
+        // Prioriza endpoint descargable estable
+        candidates.push(`https://drive.usercontent.google.com/uc?export=download&id=${id}`);
+        // Alternos
         candidates.push(`https://lh3.googleusercontent.com/d/${id}=s0`);
-        // 2) Endpoint de descarga directa de Drive
         candidates.push(`https://drive.google.com/uc?export=download&id=${id}`);
     } else if (/^https?:\/\//i.test(src)) {
         candidates.push(src);
     } else if (/^[a-zA-Z0-9_-]{20,}$/.test(src)) {
-        // ID puro
+        candidates.push(`https://drive.usercontent.google.com/uc?export=download&id=${src}`);
         candidates.push(`https://lh3.googleusercontent.com/d/${src}=s0`);
         candidates.push(`https://drive.google.com/uc?export=download&id=${src}`);
     } else {
@@ -181,13 +179,16 @@ async function fetchAsDataUrl(url) {
             redirect: "follow",
             signal: controller.signal,
             headers: {
-                // Algunos endpoints de Drive/LH3 requieren UA “real”
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome PDF-Renderer"
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome PDF-Renderer",
+                "Accept": "image/*,*/*"
             }
         });
         clearTimeout(t);
 
-        if (!res.ok) return "";
+        if (!res.ok) {
+            console.warn(`[render][img][http] ${url} status=${res.status} type=${res.headers.get("content-type") || ""}`);
+            return "";
+        }
 
         const ctype = (res.headers.get("content-type") || "").split(";")[0] || guessContentType(url) || "application/octet-stream";
         const ab = await res.arrayBuffer();

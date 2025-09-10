@@ -128,19 +128,22 @@ function bindImageUrl(tpl, map) {
     const raw = String(map?.[m[1]] || "").trim();
     if (!raw) return "";
 
+    // data URI directa
+    if (/^data:/i.test(raw)) return raw;
+
     // URL ? intenta extraer ID si es de Drive
     if (/^https?:\/\//i.test(raw)) {
         const id =
             (/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]) ||
             (/drive\.google\.com\/uc\?(?:[^#]*&)?id=([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]) ||
             (/googleusercontent\.com\/d\/([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]);
-        if (id) return `https://lh3.googleusercontent.com/d/${id}=s0`; // tamaño explícito evita 400
+        if (id) return `https://drive.usercontent.google.com/uc?export=download&id=${id}`;
         return raw;
     }
 
     // ID puro
     if (/^[a-zA-Z0-9_-]{20,}$/.test(raw)) {
-        return `https://lh3.googleusercontent.com/d/${raw}=s0`;
+        return `https://drive.usercontent.google.com/uc?export=download&id=${raw}`;
     }
 
     return "";
