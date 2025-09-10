@@ -102,21 +102,21 @@ async function inlineExternalImages(html, rid) {
     const replacements = await Promise.all(
         matches.map(async (m) => {
             const fullTag = m[0];
-            const src = m[1];
+            const srcAttr = m[1];
 
             // Si ya viene en data:, no tocar
-            if (/^data:/i.test(src)) return null;
+            if (/^data:/i.test(srcAttr)) return null;
 
             try {
-                const dataUrl = await toDataUrl(src);
+                const dataUrl = await toDataUrl(srcAttr);
                 if (!dataUrl) {
-                    console.warn(`[render][img][skip] src=${src} rid=${rid} err=no_data_url`);
+                    console.warn(`[render][img][skip] src=${srcAttr} rid=${rid} err=no_data_url`);
                     return null;
                 }
-                const newTag = fullTag.replace(src, dataUrl);
+                const newTag = fullTag.replace(srcAttr, dataUrl);
                 return { from: fullTag, to: newTag };
             } catch (err) {
-                console.warn(`[render][img][skip] src=${src} rid=${rid} err=${err?.message || err}`);
+                console.warn(`[render][img][skip] src=${srcAttr} rid=${rid} err=${err?.message || err}`);
                 return null;
             }
         })
@@ -131,7 +131,10 @@ async function inlineExternalImages(html, rid) {
 }
 
 /** Genera una data:URL desde ID/URL de Drive o URL http/https normal */
-async function toDataUrl(src) {
+async function toDataUrl(srcIn) {
+    // Normaliza entidades HTML (&amp; -> &)
+    let src = htmlUnescape(srcIn);
+
     // Acepta data: tal cual
     if (/^data:/i.test(src)) return src;
 
@@ -207,4 +210,13 @@ function guessContentType(u) {
     if (low.includes(".webp")) return "image/webp";
     if (low.includes(".svg")) return "image/svg+xml";
     return null;
+}
+
+function htmlUnescape(s) {
+    return String(s)
+        .replace(/&amp;/gi, "&")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">");
 }
