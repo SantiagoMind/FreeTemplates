@@ -47,22 +47,22 @@ app.post("/render", async (req, res) => {
         });
         const page = await browser.newPage();
 
-        // El viewport no afecta al PDF, pero ayuda al layout previo
         await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 });
 
-        // Cargar contenido
         await page.setContent(html, { waitUntil: "load", timeout: 120000 });
 
-        // Asegurar que todas las imágenes están listas
+        // Esperar a que carguen (o fallen) todas las imágenes por si quedó alguna externa
         await page.evaluate(async () => {
             const imgs = Array.from(document.images || []);
-            await Promise.all(imgs.map(img => {
-                if (img.complete) return;
-                return new Promise(resolve => {
-                    img.addEventListener("load", resolve, { once: true });
-                    img.addEventListener("error", resolve, { once: true });
-                });
-            }));
+            await Promise.all(
+                imgs.map(img => {
+                    if (img.complete) return;
+                    return new Promise(resolve => {
+                        img.addEventListener("load", resolve, { once: true });
+                        img.addEventListener("error", resolve, { once: true });
+                    });
+                })
+            );
         });
 
         const pdf = await page.pdf({
@@ -96,43 +96,106 @@ app.listen(PORT, () => console.log("renderer listening on", PORT));
 
 /** Convierte cada <img src="..."> en data:URI para evitar timing/redirects/cookies */
 async function inlineExternalImages(html, rid) {
-    const srcs = Array.from(html.matchAll(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi)).map(m => m[1]);
-    if (!srcs.length) return html;
+    const IMG_RE = /<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi;
+    const matches = Array.from(html.matchAll(IMG_RE));
+    if (!matches.length) return html;
 
-    const map = new Map();
-    await Promise.all(srcs.map(async (src) => {
-        try {
-            const url = toAbsoluteDriveUrl(src);
-            const resp = await fetch(url, { redirect: "follow" });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const buf = Buffer.from(await resp.arrayBuffer());
-            const ct = resp.headers.get("content-type") || guessContentType(url) || "application/octet-stream";
-            const dataUri = `data:${ct};base64,${buf.toString("base64")}`;
-            map.set(src, dataUri);
-            if (url !== src) map.set(url, dataUri);
-        } catch (err) {
-            console.warn(`[render][img][skip] src=${src} rid=${rid} err=${err?.message || err}`);
-        }
-    }));
+    const replacements = await Promise.all(
+        matches.map(async (m) => {
+            const fullTag = m[0];
+            const src = m[1];
+
+            try {
+                const dataUrl = await toDataUrl(src);
+                if (!dataUrl) {
+                    console.warn(`[render][img][skip] src=${src} rid=${rid} err=no_data_url`);
+                    return null;
+                }
+                // Reemplazo conservando atributos originales
+                const newTag = fullTag.replace(src, dataUrl);
+                return { from: fullTag, to: newTag };
+            } catch (err) {
+                console.warn(`[render][img][skip] src=${src} rid=${rid} err=${err?.message || err}`);
+                return null;
+            }
+        })
+    );
 
     let out = html;
-    for (const [from, to] of map) {
-        const safe = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        out = out.replace(new RegExp(safe, "g"), to);
+    for (const r of replacements) {
+        if (!r) continue;
+        // reemplazar todas las ocurrencias de la etiqueta original
+        out = out.split(r.from).join(r.to);
     }
     return out;
 }
 
-/** Normaliza Drive ID/URL a un endpoint descargable directo */
-function toAbsoluteDriveUrl(src) {
-    // ID puro
-    if (/^[a-zA-Z0-9_-]{20,}$/.test(src)) {
-        return `https://drive.google.com/uc?export=download&id=${src}`;
+/** Genera una data:URL a partir de:
+ *  - ID de Drive
+ *  - URL de Drive (/file/d/<id>, uc?id=)
+ *  - URL http/https normal
+ *  Intenta múltiples endpoints descargables de Drive.
+ */
+async function toDataUrl(src) {
+    const id = extractDriveId(src);
+    const candidates = [];
+
+    if (id) {
+        // 1) Fast CDN de Google Photos/LH3
+        candidates.push(`https://lh3.googleusercontent.com/d/${id}=s0`);
+        // 2) Endpoint de descarga directa de Drive
+        candidates.push(`https://drive.google.com/uc?export=download&id=${id}`);
+    } else if (/^https?:\/\//i.test(src)) {
+        candidates.push(src);
+    } else if (/^[a-zA-Z0-9_-]{20,}$/.test(src)) {
+        // ID puro
+        candidates.push(`https://lh3.googleusercontent.com/d/${src}=s0`);
+        candidates.push(`https://drive.google.com/uc?export=download&id=${src}`);
+    } else {
+        return "";
     }
-    // URL /file/d/{id}/view
-    const m = /https?:\/\/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]{20,})/.exec(src);
-    if (m) return `https://drive.google.com/uc?export=download&id=${m[1]}`;
-    return src;
+
+    for (const url of candidates) {
+        const data = await fetchAsDataUrl(url);
+        if (data) return data;
+    }
+    return "";
+}
+
+function extractDriveId(url) {
+    if (!/^https?:\/\//i.test(url)) return "";
+    return (
+        (/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]{20,})/i.exec(url)?.[1]) ||
+        (/drive\.google\.com\/uc\?(?:[^#]*&)?id=([a-zA-Z0-9_-]{20,})/i.exec(url)?.[1]) ||
+        (/googleusercontent\.com\/d\/([a-zA-Z0-9_-]{20,})/i.exec(url)?.[1]) ||
+        ""
+    );
+}
+
+async function fetchAsDataUrl(url) {
+    try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 20000);
+
+        const res = await fetch(url, {
+            redirect: "follow",
+            signal: controller.signal,
+            headers: {
+                // Algunos endpoints de Drive/LH3 requieren UA “real”
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome PDF-Renderer"
+            }
+        });
+        clearTimeout(t);
+
+        if (!res.ok) return "";
+
+        const ctype = (res.headers.get("content-type") || "").split(";")[0] || guessContentType(url) || "application/octet-stream";
+        const ab = await res.arrayBuffer();
+        const b64 = Buffer.from(ab).toString("base64");
+        return `data:${ctype};base64,${b64}`;
+    } catch {
+        return "";
+    }
 }
 
 function guessContentType(u) {
