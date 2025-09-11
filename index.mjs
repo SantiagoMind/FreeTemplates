@@ -1,10 +1,11 @@
-// index.mjs
+// index.mjs — Render HTML->PDF (pdf_base64) compatible con tu GAS actual
 import express from "express";
 import puppeteer from "puppeteer";
 import { buildHtml } from "./build-html.mjs";
 
 const app = express();
-app.use(express.json({ limit: "12mb" }));
+// Acepta payloads grandes (data:URI de imágenes)
+app.use(express.json({ limit: process.env.JSON_LIMIT || "64mb" }));
 
 // Logging por request
 app.use((req, _res, next) => {
@@ -25,28 +26,30 @@ app.use((req, res, next) => {
 });
 
 app.get("/health", (_req, res) => res.status(200).send("ok"));
+app.get("/", (_req, res) => res.status(200).send("ok"));
+app.head("/", (_req, res) => res.status(200).end());
 
-// Puppeteer en modo singleton para evitar OOM/restarts
+// Puppeteer singleton para evitar OOM/restarts
 let browser;
 async function getBrowser() {
     if (browser) return browser;
     browser = await puppeteer.launch({
+        headless: true,
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
             "--font-render-hinting=none",
         ],
-        headless: true,
     });
     return browser;
 }
 process.on("exit", async () => { try { await browser?.close(); } catch { } });
 
-// Concurrencia simple: 1 en curso
+// Concurrencia: 1 en curso. Responder 429 si ocupado.
 let busy = false;
 
-/* =============== /render -> PDF (COMO ANTES) =============== */
+// Endpoint principal: devuelve { pdf_base64 }
 app.post("/render", async (req, res) => {
     const rid = req.headers["x-req-id"] || "no-req-id";
     const t0 = Date.now();
@@ -62,19 +65,23 @@ app.post("/render", async (req, res) => {
             return res.status(400).json({ error: "invalid_ast" });
         }
 
-        // 1) HTML
+        // 1) Construir HTML desde AST/DATA (imágenes esperadas como data:URI o URLs públicas)
         const html = buildHtml({ ast, data, flags, cssTokens, options });
 
-        // 2) PDF
+        // 2) Render con navegador persistente
         const br = await getBrowser();
         page = await br.newPage();
-        page.setDefaultTimeout(120000);
-        page.setDefaultNavigationTimeout(120000);
+        page.setDefaultTimeout(300000);
+        page.setDefaultNavigationTimeout(300000);
         await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 });
 
-        await page.setContent(html, { waitUntil: "load", timeout: 120000 });
+        // Menos sensible a redes lentas que "networkidle0"
+        await page.setContent(html, { waitUntil: "load", timeout: 300000 });
+
+        // Esperar fuentes (si existen)
         try { await page.evaluate(() => document.fonts && document.fonts.ready); } catch { }
 
+        // Espera acotada para imágenes: load/error o timeout global
         await page.evaluate(async (maxWaitMs) => {
             const imgs = Array.from(document.images || []);
             const waitOne = (img) =>
@@ -89,14 +96,15 @@ app.post("/render", async (req, res) => {
             await Promise.race([all, new Promise((r) => setTimeout(r, maxWaitMs))]);
         }, 15000);
 
-        const pdf = await page.pdf({
+        const pdfOpts = {
             printBackground: true,
             preferCSSPageSize: true,
             displayHeaderFooter: false,
-            timeout: 120000,
-            scale: 0.9,
-            ...(options.pdf || {}),
-        });
+            timeout: 300000,
+            scale: options.scale ?? 0.9, // ayuda a bajar presión de raster
+        };
+
+        const pdf = await page.pdf({ ...pdfOpts, ...(options.pdf || {}) });
 
         const mu = process.memoryUsage();
         console.log(
@@ -116,123 +124,12 @@ app.post("/render", async (req, res) => {
     }
 });
 
-/* =============== /layout -> JSON (opcional) =============== */
-// Helpers de layout
-function extractPhotoBindings(ast = {}) {
-    const comps = ast?.byBlock?.photos || [];
-    const items = [];
-    for (let i = 0; i < comps.length; i += 2) {
-        const img = comps[i];
-        const cap = comps[i + 1];
-        const mImg = /{{img:([^}]+)}}/.exec(img?.binding || "");
-        const mCap = /{{col:([^}]+)}}/.exec(cap?.binding || "");
-        if (mImg) items.push({ srcKey: mImg[1], capKey: mCap ? mCap[1] : null });
-    }
-    return items;
-}
-function extractTextCols(ast = {}) {
-    const cols = new Set();
-    const byBlock = ast?.byBlock || {};
-    for (const blk of Object.values(byBlock)) {
-        (blk || []).forEach((comp) => {
-            const m = /{{col:([^}]+)}}/.exec(comp?.binding || "");
-            if (m) cols.add(m[1]);
-        });
-    }
-    return Array.from(cols);
-}
-function pickGrid(n) {
-    if (n <= 1) return { rows: 1, cols: 1 };
-    if (n === 2) return { rows: 1, cols: 2 };
-    if (n <= 4) return { rows: 2, cols: 2 };
-    if (n <= 6) return { rows: 2, cols: 3 };
-    return { rows: 3, cols: 3 };
-}
-function buildRelativeBoxes(rows, cols, { margin = 0.05, gap = 0.02 } = {}) {
-    const boxes = [];
-    const totalGapW = gap * (cols - 1);
-    const totalGapH = gap * (rows - 1);
-    const innerW = 1 - margin * 2 - totalGapW;
-    const innerH = 1 - margin * 2 - totalGapH;
-    const cellW = innerW / cols;
-    const cellH = innerH / rows;
-    for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-            const x = margin + c * (cellW + gap);
-            const y = margin + r * (cellH + gap);
-            boxes.push({ x, y, w: cellW, h: cellH });
-        }
-    }
-    return boxes;
-}
-function paginate(items, perPage) {
-    const out = [];
-    for (let i = 0; i < items.length; i += perPage) out.push(items.slice(i, i + perPage));
-    return out;
-}
-
-app.post("/layout", async (req, res) => {
-    const rid = req.headers["x-req-id"] || "no-req-id";
-    const t0 = Date.now();
-    try {
-        const { ast = {}, data = {}, options = {} } = req.body || {};
-        if (!ast?.byBlock) {
-            console.warn(`[render] 400 invalid_ast rid=${rid}`);
-            return res.status(400).json({ error: "invalid_ast" });
-        }
-
-        const colKeys = extractTextCols(ast);
-        const textMap = {};
-        colKeys.forEach((k) => (textMap[`{{col:${k}}}`] = data?.[k] ?? ""));
-
-        const items = extractPhotoBindings(ast).map((it, i) => ({
-            ...it,
-            src: data?.[it.srcKey] || null,
-            caption: it.capKey ? String(data?.[it.capKey] ?? "") : "",
-            idx: i,
-        }));
-
-        const n = items.length;
-        const grid = options.grid || pickGrid(n);
-        const boxes = buildRelativeBoxes(grid.rows, grid.cols, {
-            margin: options.margin ?? 0.05,
-            gap: options.gap ?? 0.02,
-        });
-        const perPage = grid.rows * grid.cols;
-        const pages = paginate(items, perPage);
-        const slides = pages.map((chunk) => {
-            const placements = [];
-            for (let i = 0; i < chunk.length; i++) {
-                const b = boxes[i];
-                const it = chunk[i];
-                placements.push({
-                    srcKey: it.srcKey,
-                    capKey: it.capKey,
-                    x_rel: b.x,
-                    y_rel: b.y,
-                    w_rel: b.w,
-                    h_rel: b.h,
-                    src: it.src,
-                    caption: it.caption,
-                    idx: it.idx,
-                });
-            }
-            return { items: placements };
-        });
-
-        const payload = { unit: "relative", grid, per_slide: perPage, count: n, textMap, slides };
-        console.log(`[render] -> 200 layout slides=${slides.length} items=${n} durMs=${Date.now() - t0} rid=${rid}`);
-        return res.json(payload);
-    } catch (e) {
-        console.error(`[render][ERROR] rid=${rid} ${e?.stack || String(e)}`);
-        return res.status(500).json({ error: "layout_failed" });
-    }
-});
-
 // Graceful shutdown
 process.on("SIGTERM", () => process.exit(0));
 process.on("SIGINT", () => process.exit(0));
-process.on("unhandledRejection", (err) => console.error("[render][unhandledRejection]", err));
+process.on("unhandledRejection", (err) => {
+    console.error("[render][unhandledRejection]", err);
+});
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log("renderer listening on", PORT));
