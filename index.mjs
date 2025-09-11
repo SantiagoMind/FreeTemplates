@@ -26,11 +26,34 @@ app.use((req, res, next) => {
 
 app.get("/health", (_req, res) => res.status(200).send("ok"));
 
+// Puppeteer en modo singleton para evitar OOM y reinicios
+let browser;
+async function getBrowser() {
+    if (browser) return browser;
+    browser = await puppeteer.launch({
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--font-render-hinting=none",
+        ],
+        headless: true,
+    });
+    return browser;
+}
+process.on("exit", async () => { try { await browser?.close(); } catch { } });
+
+// Concurrencia: 1 en curso. Responder 429 si ocupado.
+let busy = false;
+
 app.post("/render", async (req, res) => {
     const rid = req.headers["x-req-id"] || "no-req-id";
     const t0 = Date.now();
 
-    let browser;
+    if (busy) return res.status(429).json({ error: "busy_try_again" });
+    busy = true;
+
+    let page;
     try {
         const { ast, data, flags = [], cssTokens = {}, options = {} } = req.body || {};
         if (!ast || !Array.isArray(ast.blocks) || !ast.byBlock) {
@@ -41,21 +64,11 @@ app.post("/render", async (req, res) => {
         // 1) HTML base (sin inline de imágenes)
         const html = buildHtml({ ast, data, flags, cssTokens, options });
 
-        // 2) Render PDF (flags endurecidos para contenedor)
-        const launchArgs = [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--font-render-hinting=none",
-        ];
-        browser = await puppeteer.launch({
-            args: launchArgs,
-            headless: true,
-        });
-        const page = await browser.newPage();
+        // 2) Render PDF con navegador persistente
+        const br = await getBrowser();
+        page = await br.newPage();
         page.setDefaultTimeout(120000);
         page.setDefaultNavigationTimeout(120000);
-
         await page.setViewport({ width: 1200, height: 800, deviceScaleFactor: 1 });
 
         // Menos sensible a redes lentas que "networkidle0"
@@ -79,15 +92,20 @@ app.post("/render", async (req, res) => {
             await Promise.race([all, new Promise((r) => setTimeout(r, maxWaitMs))]);
         }, 15000);
 
-        const pdf = await page.pdf({
+        const basePdfOpts = {
             printBackground: true,
             preferCSSPageSize: true,
             displayHeaderFooter: false,
             timeout: 120000,
-            ...options.pdf, // permite override opcional
-        });
+            scale: 0.9, // reduce presión de raster
+        };
+        const pdf = await page.pdf({ ...basePdfOpts, ...(options.pdf || {}) });
 
-        console.log(`[render] -> 200 pdf_bytes=${pdf.length} durMs=${Date.now() - t0} rid=${rid}`);
+        const mu = process.memoryUsage();
+        console.log(
+            `[render] -> 200 pdf_bytes=${pdf.length} rss=${mu.rss} heapUsed=${mu.heapUsed} durMs=${Date.now() - t0} rid=${rid}`
+        );
+
         return res.json({
             pdf_base64: Buffer.from(pdf).toString("base64"),
             ...(process.env.RETURN_HTML === "1" ? { html_debug: html } : {}),
@@ -96,7 +114,8 @@ app.post("/render", async (req, res) => {
         console.error(`[render][ERROR] rid=${rid} ${e?.stack || String(e)}`);
         return res.status(500).json({ error: "render_failed" });
     } finally {
-        try { if (browser) await browser.close(); } catch { }
+        try { await page?.close(); } catch { }
+        busy = false;
     }
 });
 
