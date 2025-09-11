@@ -15,8 +15,10 @@ export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options 
     :root { ${tokensCss} }
     html, body { padding:0; margin:0; font-family: var(--font, Roboto, Arial, sans-serif); color:#111; }
 
-    /* permitir cortes entre páginas para ocupar huecos */
-    section { break-inside: auto; page-break-inside: auto; }
+    /* secciones: permitir cortes y añadir gap configurable */
+    section.sec { break-inside:auto; page-break-inside:auto; margin:0 0 var(--block-gap, 6mm) 0; }
+    section.sec-header { margin-bottom: 3mm; }  /* header más compacto */
+    section.sec-general { margin-bottom: 5mm; } /* más aire debajo del bloque general */
     .pb { page-break-before: always; }
 
     /* texto base */
@@ -39,7 +41,9 @@ export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options 
     let body = "";
 
     for (const b of (ast.blocks || [])) {
-        body += `<section class="${b.page_break_before ? "pb" : ""}">`;
+        const secClasses = ["sec", `sec-${cssClassSafe(b.block_id || "block")}`];
+        if (b.page_break_before) secClasses.push("pb");
+        body += `<section class="${secClasses.join(" ")}">`;
 
         const comps = ast.byBlock?.[b.block_id] || [];
         for (const c of comps) {
