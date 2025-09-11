@@ -14,14 +14,17 @@ export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options 
     @page { size: ${page.size}; margin: ${page.marginTop} ${page.marginRight} ${page.marginBottom} ${page.marginLeft}; }
     :root { ${tokensCss} }
     html, body { padding:0; margin:0; font-family: var(--font, Roboto, Arial, sans-serif); color:#111; }
-    section { break-inside: avoid; }
+
+    /* permitir cortes entre páginas para ocupar huecos */
+    section { break-inside: auto; page-break-inside: auto; }
     .pb { page-break-before: always; }
 
     /* texto base */
     .text { font-size: 11pt; line-height: 1.25; }
 
-    /* tabla base */
-    table.tbl { width:100%; border-collapse: collapse; table-layout: fixed; }
+    /* tabla base: permitir dividir por filas entre páginas */
+    table.tbl { width:100%; border-collapse: collapse; table-layout: fixed; page-break-inside:auto; break-inside:auto; }
+    table.tbl tr { page-break-inside: avoid; break-inside: avoid; }
     table.tbl th, table.tbl td { border: 1px solid #ddd; padding: 4pt; word-wrap: break-word; font-size: 10pt; }
     table.tbl thead th { background: #f5f5f5; font-weight: 600; }
 
