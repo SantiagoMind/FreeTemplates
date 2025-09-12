@@ -10,11 +10,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Directorios de runtime
+RUN mkdir -p assets tmp
+ENV TMPDIR=/app/tmp
+
 # Instala dependencias (incluye Chromium de Puppeteer)
 COPY package*.json ./
 ENV NODE_ENV=production
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 # Fuerza rebuild si el cache de Render es agresivo
 ARG CACHE_BUST=20250912
