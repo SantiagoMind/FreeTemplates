@@ -135,6 +135,13 @@ function bindImageUrl(tpl, map) {
     const raw = String(map?.[m[1]] || "").trim();
     if (!raw) return "";
 
+    // NUEVO: artifact (asset:<id>)
+    if (/^asset:/i.test(raw)) {
+        const id = raw.slice(6);
+        const base = (map.__assetsBase || "").replace(/\/+$/, "");
+        return base ? `${base}/assets/${encodeURIComponent(id)}` : `/assets/${encodeURIComponent(id)}`;
+    }
+
     // data URI directa
     if (/^data:/i.test(raw)) return raw;
 
@@ -148,7 +155,7 @@ function bindImageUrl(tpl, map) {
         return raw;
     }
 
-    // ID puro
+    // ID puro (Drive)
     if (/^[a-zA-Z0-9_-]{20,}$/.test(raw)) {
         return `https://drive.usercontent.google.com/uc?export=download&id=${raw}`;
     }
@@ -177,7 +184,7 @@ function stylesToCss(styleMap) {
     for (const [key, s] of Object.entries(styleMap)) {
         const cls = `.s-${cssClassSafe(key)}`;
         const font = s.font ? `font-family:${cssValue(s.font)};` : "";
-        const size = s.size ? `font-size:${Number(s.size)}pt;` : "";
+        the const size = s.size ? `font-size:${Number(s.size)}pt;` : "";
         const weight = s.weight === "bold" ? "font-weight:700;" : "";
         const align = s.align ? `text-align:${cssValue(s.align)};` : "";
         const color = s.color ? `color:${cssValue(s.color)};` : "";
