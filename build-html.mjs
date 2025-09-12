@@ -178,13 +178,12 @@ function mapStyles(styles) {
     }
     return map;
 }
-
 function stylesToCss(styleMap) {
     let out = "";
     for (const [key, s] of Object.entries(styleMap)) {
         const cls = `.s-${cssClassSafe(key)}`;
         const font = s.font ? `font-family:${cssValue(s.font)};` : "";
-        the const size = s.size ? `font-size:${Number(s.size)}pt;` : "";
+        const size = s.size ? `font-size:${Number(s.size)}pt;` : "";
         const weight = s.weight === "bold" ? "font-weight:700;" : "";
         const align = s.align ? `text-align:${cssValue(s.align)};` : "";
         const color = s.color ? `color:${cssValue(s.color)};` : "";
