@@ -1,5 +1,5 @@
 // Renderer HTML a partir de un AST declarativo.
-// Soporta components: text | image | table
+// Soporta components: text | image | table | photo_card
 // Placeholders visibles u ocultos por componente.
 // Estilos declarativos a clases CSS.
 
@@ -64,6 +64,7 @@ function renderComponent(c, ctx) {
         case "text": return renderText(c, ctx);
         case "image": return renderImage(c, ctx);
         case "table": return renderTableComponent(c, ctx);
+        case "photo_card": return renderPhotoCard(c, ctx);   // <-- NUEVO
         default: return "";
     }
 }
@@ -100,6 +101,39 @@ function renderImage(c, { data, styleMap }) {
         return "";
     }
     return `<img src="${escapeAttr(url)}" ${style} />`;
+}
+
+// --- NUEVO: tarjeta de foto (caption arriba + imagen) con layout en columnas
+function renderPhotoCard(c, { data, styleMap }) {
+    const url = bindImageUrl(c.binding, data);
+    if (!url) {
+        const mode = (c.placeholderMode || "hidden").toLowerCase();
+        if (mode === "visible") {
+            const phClass = classFor(c.placeholderStyle || "", styleMap, ["placeholder"]);
+            return `<div class="${phClass}">Imagen no disponible</div>`;
+        }
+        return "";
+    }
+
+    const capTxt = bindText(c.cap_binding || c.caption || "", data);
+
+    // Propiedades tomadas del style_id (si existen), con defaults sensatos
+    const tileW = lookupStyle(styleMap, c.style_id, "tile_width") || "32%";       // ~3 por fila
+    const gap = lookupStyle(styleMap, c.style_id, "gap") || "6mm";
+    const maxH = lookupStyle(styleMap, c.style_id, "image_max_height") || "120px";
+    const fit = lookupStyle(styleMap, c.style_id, "image_fit") || "contain";
+    const capAl = lookupStyle(styleMap, c.style_id, "caption_align") || "center";
+    const capSz = lookupStyle(styleMap, c.style_id, "caption_size");
+    const capBold = (lookupStyle(styleMap, c.style_id, "caption_weight") || "").toLowerCase() === "bold";
+
+    const capCss = `${capSz ? `font-size:${Number(capSz)}pt;` : ""}${capBold ? "font-weight:bold;" : ""}text-align:${capAl};margin:0 0 2mm 0;`;
+    const imgCss = `display:block;max-width:100%;max-height:${cssNumber(maxH)};object-fit:${fit};margin:0 auto;`;
+
+    return `
+<figure style="display:inline-block;width:${cssNumber(tileW)};margin:0 ${cssNumber(gap)} ${cssNumber(gap)} 0;vertical-align:top;">
+  ${capTxt ? `<figcaption style="${capCss}">${escapeHtml(capTxt)}</figcaption>` : ``}
+  <img src="${escapeAttr(url)}" style="${imgCss}">
+</figure>`;
 }
 
 function renderTableComponent(c, { data, styleMap }) {
