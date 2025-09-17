@@ -1,7 +1,6 @@
 // Renderer HTML a partir de un AST declarativo.
-// Soporta components: text | image | table | photo_card
-// Placeholders visibles u ocultos por componente.
-// Estilos declarativos a clases CSS.
+// Soporta components: text | image | table
+// Photogrid: agrupa caption+image en 3 columnas (configurable)
 
 export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options = {} }) {
     const flagSet = new Set(flags);
@@ -15,27 +14,41 @@ export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options 
     :root { ${tokensCss} }
     html, body { padding:0; margin:0; font-family: var(--font, Roboto, Arial, sans-serif); color:#111; }
 
-    /* secciones: permitir cortes y añadir gap configurable */
     section.sec { break-inside:auto; page-break-inside:auto; margin:0 0 var(--block-gap, 6mm) 0; }
-    section.sec-header { margin-bottom: 3mm; }  /* header más compacto */
-    section.sec-general { margin-bottom: 5mm; } /* más aire debajo del bloque general */
+    section.sec-header { margin-bottom: 3mm; }
+    section.sec-general { margin-bottom: 5mm; }
     .pb { page-break-before: always; }
 
-    /* texto base */
     .text { font-size: 11pt; line-height: 1.25; }
 
-    /* tabla base: permitir dividir por filas entre páginas */
     table.tbl { width:100%; border-collapse: collapse; table-layout: fixed; page-break-inside:auto; break-inside:auto; }
     table.tbl tr { page-break-inside: avoid; break-inside: avoid; }
     table.tbl th, table.tbl td { border: 1px solid #ddd; padding: 4pt; word-wrap: break-word; font-size: 10pt; }
     table.tbl thead th { background: #f5f5f5; font-weight: 600; }
 
-    /* placeholder */
     .placeholder { color:#777; font-style: italic; }
 
-    /* estilos generados */
-    ${stylesToCss(styleMap)}
+    /* ===== Photogrid ===== */
+    .pg-grid {
+      display:grid;
+      grid-template-columns: repeat(var(--pg-cols, 3), 1fr);
+      gap: var(--pg-gap, 6mm);
+      align-items: start;
+    }
+    .pg-tile { display:flex; flex-direction:column; align-items:center; break-inside:avoid; page-break-inside:avoid; }
+    .pg-caption {
+      font-size: var(--pg-cap-size, 10pt);
+      font-weight: var(--pg-cap-weight, 700);
+      text-align: var(--pg-cap-align, center);
+      margin: 0 0 2mm 0;
+    }
+    .pg-image {
+      max-width: 100%;
+      max-height: var(--pg-img-h, 170px);
+      object-fit: var(--pg-img-fit, contain);
+    }
 
+    ${stylesToCss(styleMap)}
   </style>`;
 
     let body = "";
@@ -46,15 +59,68 @@ export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options 
         body += `<section class="${secClasses.join(" ")}">`;
 
         const comps = ast.byBlock?.[b.block_id] || [];
-        for (const c of comps) {
-            const html = renderComponent(c, { data, styleMap, flagSet, ast });
-            if (html) body += html;
+
+        // Photogrid solo para el bloque "photos" si existe estilo "photogrid"
+        if ((b.block_id || "").toLowerCase() === "photos" && styleMap.photogrid) {
+            body += renderPhotoGrid(comps, { data, styleMap, flagSet, ast });
+        } else {
+            for (const c of comps) {
+                const html = renderComponent(c, { data, styleMap, flagSet, ast });
+                if (html) body += html;
+            }
         }
 
         body += `</section>`;
     }
 
     return `<!doctype html><html><head><meta charset="utf-8">${baseCss}</head><body>${body}</body></html>`;
+}
+
+/* ==================== Photogrid ==================== */
+
+function renderPhotoGrid(comps, ctx) {
+    const pg = ctx.styleMap.photogrid || {};
+    const cols = pg.columns || 3;
+    const gap = cssNumber(pg.gap || "8mm");
+    const imgH = cssNumber(pg.image_max_height || "170px");
+    const imgFit = pg.image_fit || "contain";
+    const capAlign = (pg.caption_align || "center");
+    const capSize = (pg.caption_size != null ? `${Number(pg.caption_size)}pt` : "10pt");
+    const capWeight = (pg.caption_weight === "bold" ? "700" : "700");
+
+    // hacer pares caption+image respetando el orden en comps
+    const tiles = [];
+    for (let i = 0; i < comps.length; i++) {
+        const c1 = comps[i];
+        const c2 = comps[i + 1];
+
+        let cap = "", src = "";
+
+        if (c1?.type === "text" && c2?.type === "image") {
+            cap = bindText(c1.binding, ctx.data);
+            src = bindImageUrl(c2.binding, ctx.data);
+            i++;
+        } else if (c1?.type === "image" && c2?.type === "text") {
+            src = bindImageUrl(c1.binding, ctx.data);
+            cap = bindText(c2.binding, ctx.data);
+            i++;
+        } else if (c1?.type === "text") {
+            cap = bindText(c1.binding, ctx.data);
+        } else if (c1?.type === "image") {
+            src = bindImageUrl(c1.binding, ctx.data);
+        }
+
+        if (!cap && !src) continue;
+        const capHtml = cap ? `<div class="pg-caption">${escapeHtml(cap)}</div>` : `<div class="pg-caption"></div>`;
+        const imgHtml = src ? `<img class="pg-image" src="${escapeAttr(src)}" />` : "";
+        tiles.push(`<div class="pg-tile">${capHtml}${imgHtml}</div>`);
+    }
+
+    const styleVars =
+        `style="--pg-cols:${cols};--pg-gap:${gap};--pg-img-h:${imgH};--pg-img-fit:${cssValue(imgFit)};` +
+        `--pg-cap-align:${cssValue(capAlign)};--pg-cap-size:${capSize};--pg-cap-weight:${capWeight};"`;
+
+    return `<div class="pg-grid" ${styleVars}>${tiles.join("")}</div>`;
 }
 
 /* ==================== Components ==================== */
@@ -64,7 +130,6 @@ function renderComponent(c, ctx) {
         case "text": return renderText(c, ctx);
         case "image": return renderImage(c, ctx);
         case "table": return renderTableComponent(c, ctx);
-        case "photo_card": return renderPhotoCard(c, ctx);   // <-- NUEVO
         default: return "";
     }
 }
@@ -103,39 +168,6 @@ function renderImage(c, { data, styleMap }) {
     return `<img src="${escapeAttr(url)}" ${style} />`;
 }
 
-// --- NUEVO: tarjeta de foto (caption arriba + imagen) con layout en columnas
-function renderPhotoCard(c, { data, styleMap }) {
-    const url = bindImageUrl(c.binding, data);
-    if (!url) {
-        const mode = (c.placeholderMode || "hidden").toLowerCase();
-        if (mode === "visible") {
-            const phClass = classFor(c.placeholderStyle || "", styleMap, ["placeholder"]);
-            return `<div class="${phClass}">Imagen no disponible</div>`;
-        }
-        return "";
-    }
-
-    const capTxt = bindText(c.cap_binding || c.caption || "", data);
-
-    // Propiedades tomadas del style_id (si existen), con defaults sensatos
-    const tileW = lookupStyle(styleMap, c.style_id, "tile_width") || "32%";       // ~3 por fila
-    const gap = lookupStyle(styleMap, c.style_id, "gap") || "6mm";
-    const maxH = lookupStyle(styleMap, c.style_id, "image_max_height") || "120px";
-    const fit = lookupStyle(styleMap, c.style_id, "image_fit") || "contain";
-    const capAl = lookupStyle(styleMap, c.style_id, "caption_align") || "center";
-    const capSz = lookupStyle(styleMap, c.style_id, "caption_size");
-    const capBold = (lookupStyle(styleMap, c.style_id, "caption_weight") || "").toLowerCase() === "bold";
-
-    const capCss = `${capSz ? `font-size:${Number(capSz)}pt;` : ""}${capBold ? "font-weight:bold;" : ""}text-align:${capAl};margin:0 0 2mm 0;`;
-    const imgCss = `display:block;max-width:100%;max-height:${cssNumber(maxH)};object-fit:${fit};margin:0 auto;`;
-
-    return `
-<figure style="display:inline-block;width:${cssNumber(tileW)};margin:0 ${cssNumber(gap)} ${cssNumber(gap)} 0;vertical-align:top;">
-  ${capTxt ? `<figcaption style="${capCss}">${escapeHtml(capTxt)}</figcaption>` : ``}
-  <img src="${escapeAttr(url)}" style="${imgCss}">
-</figure>`;
-}
-
 function renderTableComponent(c, { data, styleMap }) {
     const key = tableKey(c.binding);
     const rows = Array.isArray(data?.[key]) ? data[key] : [];
@@ -169,7 +201,7 @@ function bindImageUrl(tpl, map) {
     const raw = String(map?.[m[1]] || "").trim();
     if (!raw) return "";
 
-    // NUEVO: artifact (asset:<id>)
+    // artifact (asset:<id>)
     if (/^asset:/i.test(raw)) {
         const id = raw.slice(6);
         const base = (map.__assetsBase || "").replace(/\/+$/, "");
@@ -179,7 +211,7 @@ function bindImageUrl(tpl, map) {
     // data URI directa
     if (/^data:/i.test(raw)) return raw;
 
-    // URL ? intenta extraer ID si es de Drive
+    // URL -> intenta Drive
     if (/^https?:\/\//i.test(raw)) {
         const id =
             (/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]{20,})/i.exec(raw)?.[1]) ||
@@ -189,7 +221,7 @@ function bindImageUrl(tpl, map) {
         return raw;
     }
 
-    // ID puro (Drive)
+    // ID Drive
     if (/^[a-zA-Z0-9_-]{20,}$/.test(raw)) {
         return `https://drive.usercontent.google.com/uc?export=download&id=${raw}`;
     }
@@ -225,7 +257,11 @@ function stylesToCss(styleMap) {
         const bg = s.bg ? `background:${cssValue(s.bg)};` : "";
         const pad = s.padding ? `padding:${cssNumber(s.padding)};` : "";
         const bor = s.border ? `border:${cssValue(s.border)};` : "";
-        out += `${cls}{${font}${size}${weight}${align}${color}${lh}${bg}${pad}${bor}}\n`;
+        const width = s.width ? `width:${cssNumber(s.width)};` : "";
+        const maxW = s.max_width ? `max-width:${cssNumber(s.max_width)};` : "";
+        const maxH = s.max_height ? `max-height:${cssNumber(s.max_height)};` : "";
+        const imgFit = s.image_fit ? `object-fit:${cssValue(s.image_fit)};` : "";
+        out += `${cls}{${font}${size}${weight}${align}${color}${lh}${bg}${pad}${bor}${width}${maxW}${maxH}${imgFit}}\n`;
     }
     return out;
 }
