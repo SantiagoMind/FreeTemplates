@@ -1,5 +1,5 @@
 // Renderer HTML a partir de un AST declarativo.
-// Soporta components: text | image | table
+// Soporta components: text | image | table | kv
 // Photogrid: agrupa caption+image en 3 columnas (configurable)
 
 export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options = {} }) {
@@ -21,6 +21,7 @@ export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options 
 
     .text { font-size: 11pt; line-height: 1.25; }
 
+    /* ===== Tabla genérica ===== */
     table.tbl { width:100%; border-collapse: collapse; table-layout: fixed; page-break-inside:auto; break-inside:auto; }
     table.tbl tr { page-break-inside: avoid; break-inside: avoid; }
     table.tbl th, table.tbl td { border: 1px solid #ddd; padding: 4pt; word-wrap: break-word; font-size: 10pt; }
@@ -46,6 +47,49 @@ export function buildHtml({ ast, data = {}, flags = [], cssTokens = {}, options 
       max-width: 100%;
       max-height: var(--pg-img-h, 170px);
       object-fit: var(--pg-img-fit, contain);
+    }
+
+    /* ===== Key-Value grid (General Information sin tabla) ===== */
+    .kv-grid {
+      display: grid;
+      grid-template-columns: repeat(var(--kv-cols, 2), 1fr);
+      gap: var(--kv-gap, 4mm);
+      align-items: start;
+    }
+    .kv-item {
+      border: 1px solid #e6e6e6;
+      border-radius: 4px;
+      padding: 4mm;
+      break-inside: avoid;
+      page-break-inside: avoid;
+      background: #fff;
+    }
+    .kv-label {
+      font-size: 8.5pt;
+      color: #666;
+      letter-spacing: .02em;
+      text-transform: uppercase;
+      margin: 0 0 1.5mm 0;
+    }
+    .kv-value {
+      font-size: 11pt;
+      font-weight: 600;
+      color: #111;
+      word-wrap: break-word;
+    }
+    /* Variante compacta sin caja */
+    .kv-compact .kv-item {
+      border: none;
+      padding: 0;
+    }
+    .kv-compact .kv-label {
+      font-weight: 600;
+      text-transform: none;
+      color: #555;
+      margin-bottom: .5mm;
+    }
+    .kv-compact .kv-value {
+      font-weight: 400;
     }
 
     ${stylesToCss(styleMap)}
@@ -130,6 +174,7 @@ function renderComponent(c, ctx) {
         case "text": return renderText(c, ctx);
         case "image": return renderImage(c, ctx);
         case "table": return renderTableComponent(c, ctx);
+        case "kv": return renderKVComponent(c, ctx);
         default: return "";
     }
 }
@@ -186,6 +231,50 @@ function renderTableComponent(c, { data, styleMap }) {
     const thead = `<thead><tr>${headers.map(h => `<th>${escapeHtml(String(h))}</th>`).join("")}</tr></thead>`;
     const tbody = `<tbody>${dataRows.map(r => `<tr>${r.map(cell => `<td>${escapeHtml(cell ?? "")}</td>`).join("")}</tr>`).join("")}</tbody>`;
     return `<table class="${cls}">${thead}${tbody}</table>`;
+}
+
+/* ====== Nuevo: Key-Value renderer ====== */
+/**
+ * c.type = "kv"
+ * c.binding = "{{table:GeneralInfo}}"
+ * Opcionales:
+ *   c.label_col_index (default 0)
+ *   c.value_col_index (default 1)
+ *   c.columns (override de columnas)
+ *   c.gap (override de gap, ej "4mm")
+ *   c.variant = "boxed" | "compact"
+ */
+function renderKVComponent(c, { data, styleMap }) {
+    const key = tableKey(c.binding);
+    const rows = Array.isArray(data?.[key]) ? data[key] : [];
+    if (!rows.length) {
+        const mode = (c.placeholderMode || "hidden").toLowerCase();
+        if (mode === "visible") {
+            const phClass = classFor(c.placeholderStyle || "", styleMap, ["placeholder"]);
+            return `<div class="${phClass}">Sin información</div>`;
+        }
+        return "";
+    }
+
+    // Si no se pasan headers, asumimos primera fila como encabezado y la omitimos.
+    const dataRows = (c.headers ? rows : rows.slice(1));
+    const li = Number.isInteger(c.label_col_index) ? c.label_col_index : 0;
+    const vi = Number.isInteger(c.value_col_index) ? c.value_col_index : 1;
+
+    const st = styleMap[c.style_id] || {};
+    const cols = c.columns || st.columns || 2;
+    const gap = cssNumber(c.gap || st.gap || "4mm");
+    const variant = (c.variant || st.variant || "boxed").toLowerCase();
+    const extraCls = variant === "compact" ? "kv-compact" : "";
+
+    const items = dataRows.map(r => {
+        const label = escapeHtml(safeStr(r[li] ?? ""));
+        const value = escapeHtml(safeStr(r[vi] ?? ""));
+        if (!label && !value) return "";
+        return `<div class="kv-item"><div class="kv-label">${label}</div><div class="kv-value">${value}</div></div>`;
+    }).join("");
+
+    return `<div class="kv-grid ${extraCls}" style="--kv-cols:${cols};--kv-gap:${gap}">${items}</div>`;
 }
 
 /* ==================== Bindings helpers ==================== */
